@@ -83,7 +83,7 @@ function LoginPage() {
     navigate({ to: "/kho", replace: true });
   }
 
-  const cur = SLIDES[slide];
+  const cur = SLIDES[slide]!;
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-background font-sans">

@@ -29,9 +29,9 @@ export function TopBar() {
   }
 
   async function changePw() {
-    if (pw.length < 6) return toast.error("Mật khẩu tối thiểu 6 ký tự");
+    if (pw.length < 6) { toast.error("Mật khẩu tối thiểu 6 ký tự"); return; }
     const { error } = await supabase.auth.updateUser({ password: pw });
-    if (error) return toast.error(error.message);
+    if (error) { toast.error(error.message); return; }
     toast.success("Đã đổi mật khẩu");
     setOpen(false);
     setPw("");
