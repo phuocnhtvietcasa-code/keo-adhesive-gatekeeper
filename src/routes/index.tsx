@@ -1,24 +1,195 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useServerFn } from "@tanstack/react-start";
+import { useEffect, useState } from "react";
+import { Eye, EyeOff, Lock, User, Loader2 } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { ensureDefaultAdmin } from "@/lib/accounts.functions";
+import { usernameToEmail } from "@/lib/username";
+import logo from "@/assets/logo.jpg.asset.json";
+import baoXanh from "@/assets/bao-xanh.jpg.asset.json";
+import baoVang from "@/assets/bao-vang.jpg.asset.json";
+import baoDo from "@/assets/bao-do.jpg.asset.json";
+import tuyp from "@/assets/tuyp-keo.jpg.asset.json";
 
-// No head() here: the home route inherits title/description/og/twitter from
-// __root.tsx, and ships no og:image so serve-time hosting can inject the
-// project's social preview (explicit og:image or latest screenshot).
 export const Route = createFileRoute("/")({
-  component: Index,
+  head: () => ({
+    meta: [
+      { title: "Đăng nhập - Quản Lý Kho Webond Vietcasa" },
+      { name: "description", content: "Đăng nhập hệ thống quản lý kho - doanh số Webond Vietcasa." },
+      { property: "og:title", content: "Đăng nhập - Quản Lý Kho Webond Vietcasa" },
+      { property: "og:description", content: "Đăng nhập hệ thống quản lý kho - doanh số Webond Vietcasa." },
+    ],
+  }),
+  component: LoginPage,
 });
 
-// IMPORTANT: Replace this placeholder. See ./README.md for routing conventions.
-function Index() {
+const SLIDES = [
+  { src: baoXanh.url, name: "Webond Pro", tag: "Bao xanh · Gạch khổ lớn", tone: "bg-brand-green" },
+  { src: baoVang.url, name: "Webond Standard", tag: "Bao vàng · Nội thất", tone: "bg-brand-yellow" },
+  { src: baoDo.url, name: "Webond Max", tag: "Bao đỏ · Ngoại thất, hồ bơi", tone: "bg-brand-orange" },
+  { src: tuyp.url, name: "Webond Epoxy", tag: "Tuýp keo chít mạch 2 thành phần", tone: "bg-brand-ink" },
+];
+
+const REMEMBER_KEY = "vc-remember";
+
+function LoginPage() {
+  const navigate = useNavigate();
+  const ensureAdmin = useServerFn(ensureDefaultAdmin);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [show, setShow] = useState(false);
+  const [remember, setRemember] = useState(false);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [slide, setSlide] = useState(0);
+
+  useEffect(() => {
+    ensureAdmin().catch(() => {});
+    supabase.auth.getUser().then(({ data }) => {
+      if (data.user) navigate({ to: "/kho", replace: true });
+    });
+    try {
+      const saved = JSON.parse(localStorage.getItem(REMEMBER_KEY) || "null");
+      if (saved) {
+        setUsername(saved.u || "");
+        setPassword(saved.p || "");
+        setRemember(true);
+      }
+    } catch {}
+    const t = setInterval(() => setSlide((s) => (s + 1) % SLIDES.length), 3500);
+    return () => clearInterval(t);
+  }, []);
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError("");
+    if (!username.trim() || !password) return setError("Vui lòng nhập tên đăng nhập và mật khẩu");
+    setLoading(true);
+    const { error } = await supabase.auth.signInWithPassword({
+      email: usernameToEmail(username),
+      password,
+    });
+    setLoading(false);
+    if (error) {
+      setError(
+        /banned/i.test(error.message)
+          ? "Tài khoản đã bị khóa. Liên hệ admin."
+          : "Sai tên đăng nhập hoặc mật khẩu",
+      );
+      return;
+    }
+    if (remember) localStorage.setItem(REMEMBER_KEY, JSON.stringify({ u: username, p: password }));
+    else localStorage.removeItem(REMEMBER_KEY);
+    navigate({ to: "/kho", replace: true });
+  }
+
+  const cur = SLIDES[slide]!;
+
   return (
-    <div
-      className="flex min-h-screen items-center justify-center"
-      style={{ backgroundColor: "#fcfbf8" }}
-    >
-      <img
-        data-lovable-blank-page-placeholder="REMOVE_THIS"
-        src="https://cdn.gpteng.co/blank-app-v1.svg"
-        alt="Your app will live here!"
-      />
+    <div className="relative min-h-screen overflow-hidden bg-background font-sans">
+      {/* diagonal brand stripes */}
+      <div className="pointer-events-none absolute -left-20 -top-40 h-64 w-[160%] -rotate-[12deg]">
+        <div className="h-40 stripe-ink" />
+        <div className="h-4 bg-brand-orange" />
+      </div>
+      <div className="pointer-events-none absolute -bottom-40 -left-20 h-64 w-[160%] -rotate-[12deg]">
+        <div className="h-4 bg-brand-yellow" />
+        <div className="h-48 bg-brand-green" />
+      </div>
+      <div className="pointer-events-none absolute -left-24 top-24 h-96 w-96 rounded-full bg-brand-orange/20 blur-2xl animate-drift" />
+      <div className="pointer-events-none absolute -right-20 bottom-40 h-72 w-72 rounded-full bg-brand-green/20 blur-2xl animate-drift" />
+
+      <div className="relative z-10 mx-auto grid min-h-screen max-w-6xl items-center gap-10 px-4 py-24 lg:grid-cols-2">
+        {/* product showcase */}
+        <div className="hidden lg:block animate-slide-in">
+          <div className="relative h-[460px]">
+            {SLIDES.map((s, i) => (
+              <img
+                key={s.name}
+                src={s.src}
+                alt={s.name}
+                className={`absolute inset-0 m-auto h-full w-full rounded-3xl bg-card object-contain p-4 shadow-card transition-all duration-700 ${
+                  i === slide ? "opacity-100 scale-100" : "opacity-0 scale-90"
+                } ${i % 2 ? "animate-float-b" : "animate-float-a"}`}
+              />
+            ))}
+          </div>
+          <div className="mt-6 flex items-center gap-4">
+            <span className={`h-3 w-3 rounded-full ${cur.tone}`} />
+            <div>
+              <p className="text-lg font-extrabold text-brand-ink">{cur.name}</p>
+              <p className="text-sm text-muted-foreground">{cur.tag}</p>
+            </div>
+            <div className="ml-auto flex gap-2">
+              {SLIDES.map((s, i) => (
+                <button
+                  key={s.name}
+                  aria-label={s.name}
+                  onClick={() => setSlide(i)}
+                  className={`h-2 rounded-full transition-all ${i === slide ? `w-8 ${s.tone}` : "w-2 bg-border"}`}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* login card */}
+        <div className="mx-auto w-full max-w-md animate-slide-in [animation-delay:.15s]">
+          <div className="overflow-hidden rounded-3xl border-t-8 border-brand-green bg-card shadow-card">
+            <div className="px-8 pb-8 pt-6">
+              <img src={logo.url} alt="Webond - Bền vững theo thời gian" className="mx-auto -my-6 h-40 object-cover" />
+              <h1 className="mt-2 text-center text-2xl font-extrabold text-brand-ink">Quản Lý Kho - Doanh Số</h1>
+              <p className="text-center text-sm text-muted-foreground">Đăng nhập để tiếp tục</p>
+
+              <form onSubmit={onSubmit} className="mt-6 space-y-4">
+                <label className="flex h-12 items-center gap-3 rounded-xl border-2 border-border px-4 transition focus-within:border-brand-green">
+                  <User className="h-5 w-5 text-brand-green" />
+                  <input
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder="Tên đăng nhập"
+                    autoComplete="username"
+                    className="flex-1 bg-transparent outline-none"
+                  />
+                </label>
+                <label className="flex h-12 items-center gap-3 rounded-xl border-2 border-border px-4 transition focus-within:border-brand-green">
+                  <Lock className="h-5 w-5 text-brand-green" />
+                  <input
+                    type={show ? "text" : "password"}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Mật khẩu"
+                    autoComplete="current-password"
+                    className="flex-1 bg-transparent outline-none"
+                  />
+                  <button type="button" onClick={() => setShow(!show)} aria-label="Hiện mật khẩu" className="text-muted-foreground">
+                    {show ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                  </button>
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} className="h-4 w-4 accent-[var(--brand-green)]" />
+                  Ghi nhớ tài khoản và mật khẩu
+                </label>
+                {error && <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>}
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-cta font-bold text-primary-foreground shadow-cta transition hover:brightness-105 active:scale-[.99] disabled:opacity-70"
+                >
+                  {loading && <Loader2 className="h-4 w-4 animate-spin" />}
+                  Đăng nhập
+                </button>
+              </form>
+              <p className="mt-6 text-center text-xs text-muted-foreground">© Công ty TNHH Gạch Nhà Việt VIETCASA</p>
+            </div>
+            <div className="flex h-2">
+              <div className="flex-1 stripe-ink" />
+              <div className="flex-1 bg-brand-orange" />
+              <div className="flex-1 bg-brand-yellow" />
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
