@@ -3,10 +3,10 @@ import { useServerFn } from "@tanstack/react-start";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
-import { Lock, Unlock, KeyRound, Trash2, UserPlus } from "lucide-react";
+import { Lock, Unlock, KeyRound, Trash2, UserPlus, Mail } from "lucide-react";
 import { TopBar } from "@/components/TopBar";
 import { useMe } from "@/hooks/use-me";
-import { createAccount, deleteAccount, listAccounts, updateAccount } from "@/lib/accounts.functions";
+import { setAccountEmail, createAccount, deleteAccount, listAccounts, updateAccount } from "@/lib/accounts.functions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -30,6 +30,7 @@ function AccountsPage() {
   const create = useServerFn(createAccount);
   const update = useServerFn(updateAccount);
   const remove = useServerFn(deleteAccount);
+  const setEmail = useServerFn(setAccountEmail);
   const accounts = useQuery({ queryKey: ["accounts"], queryFn: () => list(), enabled: !!me?.isAdmin });
   const [form, setForm] = useState({ username: "", full_name: "", password: "", role: "staff" as "admin" | "staff" });
 
@@ -106,7 +107,7 @@ function AccountsPage() {
                 return (
                   <tr key={a.id} className="border-t">
                     <td className="p-3 font-semibold">{a.username}{self && <span className="ml-1 text-xs text-muted-foreground">(bạn)</span>}</td>
-                    <td className="p-3">{a.full_name}</td>
+                    <td className="p-3">{a.full_name}<div className="text-xs text-muted-foreground">{a.email || "Chưa có email"}</div></td>
                     <td className="p-3">
                       <select
                         disabled={self}
@@ -124,6 +125,12 @@ function AccountsPage() {
                     <td className="p-3">{new Date(a.created_at).toLocaleDateString("vi-VN")}</td>
                     <td className="p-3">
                       <div className="flex justify-end gap-1">
+                        <Button size="sm" variant="outline" title="Email lấy lại mật khẩu" onClick={() => {
+                          const v = prompt(`Email của ${a.username} (để trống để xóa):`, a.email ?? "");
+                          if (v !== null) run(setEmail({ data: { id: a.id, email: v.trim() } }), "Đã lưu email");
+                        }}>
+                          <Mail className="h-4 w-4" />
+                        </Button>
                         <Button size="sm" variant="outline" title="Đặt lại mật khẩu" onClick={() => {
                           const pw = prompt(`Mật khẩu mới cho ${a.username} (tối thiểu 6 ký tự):`);
                           if (pw) run(update({ data: { id: a.id, password: pw } }), "Đã đặt lại mật khẩu");

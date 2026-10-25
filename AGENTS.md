@@ -10,4 +10,5 @@
 <!-- LOVABLE:END -->
 
 - The warehouse app is the user's original HTML kept unchanged at public/kho-app.html, shown in an iframe on /kho; never edit it — wrap features around it instead.
-- Login uses usernames mapped to `<username>@vietcasa.local` emails; public signup is disabled and only admin server functions create accounts, so the role check must stay server-side.
+
+- Login goes through the signInWithUsername server fn: username -> profiles.email (real recovery email, else username@vietcasa.local) resolved server-side so emails never reach the browser; setting an email also updates the auth email so password-reset mail can be delivered.
