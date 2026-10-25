@@ -3,8 +3,7 @@ import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useState } from "react";
 import { Eye, EyeOff, Lock, User, Loader2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { ensureDefaultAdmin } from "@/lib/accounts.functions";
-import { usernameToEmail } from "@/lib/username";
+import { ensureDefaultAdmin, signInWithUsername } from "@/lib/accounts.functions";
 import logo from "@/assets/logo.jpg.asset.json";
 import baoXanh from "@/assets/bao-xanh.jpg.asset.json";
 import baoVang from "@/assets/bao-vang.jpg.asset.json";
@@ -35,6 +34,10 @@ const REMEMBER_KEY = "vc-remember";
 function LoginPage() {
   const navigate = useNavigate();
   const ensureAdmin = useServerFn(ensureDefaultAdmin);
+  const signIn = useServerFn(signInWithUsername);
+  const [forgot, setForgot] = useState(false);
+  const [fEmail, setFEmail] = useState("");
+  const [fMsg, setFMsg] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [show, setShow] = useState(false);
@@ -65,22 +68,32 @@ function LoginPage() {
     setError("");
     if (!username.trim() || !password) return setError("Vui lòng nhập tên đăng nhập và mật khẩu");
     setLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({
-      email: usernameToEmail(username),
-      password,
-    });
-    setLoading(false);
-    if (error) {
-      setError(
-        /banned/i.test(error.message)
-          ? "Tài khoản đã bị khóa. Liên hệ admin."
-          : "Sai tên đăng nhập hoặc mật khẩu",
-      );
+    try {
+      const r = await signIn({ data: { username, password } });
+      if (!r.ok) {
+        setLoading(false);
+        setError(r.banned ? "Tài khoản đã bị khóa. Liên hệ admin." : "Sai tên đăng nhập hoặc mật khẩu");
+        return;
+      }
+      await supabase.auth.setSession({ access_token: r.access_token, refresh_token: r.refresh_token });
+    } catch {
+      setLoading(false);
+      setError("Không kết nối được, thử lại sau");
       return;
     }
+    setLoading(false);
     if (remember) localStorage.setItem(REMEMBER_KEY, JSON.stringify({ u: username, p: password }));
     else localStorage.removeItem(REMEMBER_KEY);
     navigate({ to: "/kho", replace: true });
+  }
+
+  async function sendReset(e: React.FormEvent) {
+    e.preventDefault();
+    setFMsg("Đang gửi...");
+    await supabase.auth.resetPasswordForEmail(fEmail.trim().toLowerCase(), {
+      redirectTo: `${window.location.origin}/reset-password`,
+    });
+    setFMsg("Nếu email có trong hệ thống, thư chứa link đặt lại mật khẩu đã được gửi. Hãy kiểm tra hộp thư (cả mục Spam).");
   }
 
   const cur = SLIDES[slide]!;
@@ -169,6 +182,9 @@ function LoginPage() {
                 <label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} className="h-4 w-4 accent-[var(--brand-green)]" />
                   Ghi nhớ tài khoản và mật khẩu
+                  <button type="button" onClick={() => { setForgot(true); setFMsg(""); }} className="ml-auto font-semibold text-brand-green hover:underline">
+                    Quên mật khẩu?
+                  </button>
                 </label>
                 {error && <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>}
                 <button
@@ -180,6 +196,19 @@ function LoginPage() {
                   Đăng nhập
                 </button>
               </form>
+              {forgot && (
+                <form onSubmit={sendReset} className="mt-4 space-y-3 rounded-xl border-2 border-brand-yellow bg-brand-yellow/10 p-4">
+                  <p className="text-sm font-semibold text-brand-ink">Lấy lại mật khẩu bằng email</p>
+                  <input type="email" required value={fEmail} onChange={(e) => setFEmail(e.target.value)} placeholder="Email đã đăng ký"
+                    className="h-11 w-full rounded-lg border-2 border-border bg-card px-3 outline-none focus:border-brand-green" />
+                  {fMsg && <p className="text-sm text-brand-ink">{fMsg}</p>}
+                  <div className="flex gap-2">
+                    <button type="submit" className="h-10 flex-1 rounded-lg bg-brand-green font-bold text-primary-foreground">Gửi link đặt lại</button>
+                    <button type="button" onClick={() => setForgot(false)} className="h-10 rounded-lg border px-3 text-sm">Đóng</button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">Tài khoản chưa có email? Liên hệ admin để đặt lại mật khẩu.</p>
+                </form>
+              )}
               <p className="mt-6 text-center text-xs text-muted-foreground">© Công ty TNHH Gạch Nhà Việt VIETCASA</p>
             </div>
             <div className="flex h-2">

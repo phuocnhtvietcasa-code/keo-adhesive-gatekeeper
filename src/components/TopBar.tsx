@@ -1,6 +1,8 @@
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
-import { LogOut, Users, Warehouse, KeyRound } from "lucide-react";
+import { LogOut, Users, Warehouse, KeyRound, Mail } from "lucide-react";
+import { useServerFn } from "@tanstack/react-start";
+import { setAccountEmail } from "@/lib/accounts.functions";
 import { useState } from "react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
@@ -20,6 +22,17 @@ export function TopBar() {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [pw, setPw] = useState("");
+  const saveEmail = useServerFn(setAccountEmail);
+
+  async function editEmail() {
+    const v = prompt("Email để lấy lại mật khẩu (để trống để xóa):", me?.email ?? "");
+    if (v === null) return;
+    try {
+      await saveEmail({ data: { email: v.trim() } });
+      toast.success("Đã lưu email");
+      qc.invalidateQueries({ queryKey: ["me"] });
+    } catch (e) { toast.error(e instanceof Error ? e.message : "Lỗi"); }
+  }
 
   async function signOut() {
     await qc.cancelQueries();
@@ -55,6 +68,9 @@ export function TopBar() {
         <span className="hidden sm:inline opacity-80">
           {me?.full_name || me?.username} {me?.isAdmin && <b className="text-brand-yellow">(Admin)</b>}
         </span>
+        <button onClick={editEmail} className="flex items-center gap-1 rounded-md px-2 py-1 opacity-80 hover:opacity-100" title="Email lấy lại mật khẩu">
+          <Mail className="h-4 w-4" />
+        </button>
         <button onClick={() => setOpen(true)} className="flex items-center gap-1 rounded-md px-2 py-1 opacity-80 hover:opacity-100" title="Đổi mật khẩu">
           <KeyRound className="h-4 w-4" />
         </button>
