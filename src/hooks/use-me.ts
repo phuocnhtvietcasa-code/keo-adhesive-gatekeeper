@@ -8,13 +8,14 @@ export function useMe() {
       const { data: u } = await supabase.auth.getUser();
       if (!u.user) return null;
       const [{ data: profile }, { data: roles }] = await Promise.all([
-        supabase.from("profiles").select("username, full_name").eq("id", u.user.id).maybeSingle(),
+        supabase.from("profiles").select("username, full_name, email").eq("id", u.user.id).maybeSingle(),
         supabase.from("user_roles").select("role").eq("user_id", u.user.id),
       ]);
       return {
         id: u.user.id,
         username: profile?.username ?? "",
         full_name: profile?.full_name ?? "",
+        email: profile?.email ?? "",
         isAdmin: !!roles?.some((r) => r.role === "admin"),
       };
     },
