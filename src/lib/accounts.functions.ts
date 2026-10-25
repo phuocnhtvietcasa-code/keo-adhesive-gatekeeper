@@ -44,7 +44,7 @@ export const listAccounts = createServerFn({ method: "GET" })
     const admin = await assertAdmin(context);
     const { data: profiles } = await admin
       .from("profiles")
-      .select("id, username, full_name, locked, created_at")
+      .select("id, username, full_name, email, locked, created_at")
       .order("created_at");
     const { data: roles } = await admin.from("user_roles").select("user_id, role");
     return (profiles ?? []).map((p) => ({
@@ -137,4 +137,59 @@ export const deleteAccount = createServerFn({ method: "POST" })
     const { error } = await admin.auth.admin.deleteUser(data.id);
     if (error) throw new Error(error.message);
     return { ok: true };
+  });
+
+const emailSchema = z.string().trim().toLowerCase().email("Email không hợp lệ").max(254);
+
+async function applyEmail(admin: any, id: string, email: string | null) {
+  const { data: prof } = await admin.from("profiles").select("username").eq("id", id).single();
+  if (!prof) throw new Error("Không tìm thấy tài khoản");
+  if (email) {
+    const { data: dup } = await admin.from("profiles").select("id").ilike("email", email).neq("id", id).maybeSingle();
+    if (dup) throw new Error("Email đã được dùng cho tài khoản khác");
+  }
+  const { error } = await admin.auth.admin.updateUserById(id, {
+    email: email ?? usernameToEmail(prof.username),
+    email_confirm: true,
+  });
+  if (error) throw new Error(error.message);
+  await admin.from("profiles").update({ email }).eq("id", id);
+}
+
+// Admin sets any account's recovery email; anyone may set their own.
+export const setAccountEmail = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d) =>
+    z.object({ id: z.string().uuid().optional(), email: z.union([emailSchema, z.literal("")]) }).parse(d),
+  )
+  .handler(async ({ data, context }) => {
+    const id = data.id ?? context.userId;
+    const admin =
+      id === context.userId
+        ? (await import("@/integrations/supabase/client.server")).supabaseAdmin
+        : await assertAdmin(context);
+    await applyEmail(admin, id, data.email || null);
+    return { ok: true };
+  });
+
+// Public: resolves username -> auth email server-side and signs in; email never reaches the browser.
+export const signInWithUsername = createServerFn({ method: "POST" })
+  .inputValidator((d) =>
+    z.object({ username: z.string().trim().toLowerCase().min(1).max(64), password: z.string().min(1).max(72) }).parse(d),
+  )
+  .handler(async ({ data }) => {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { createClient } = await import("@supabase/supabase-js");
+    const { data: prof } = await supabaseAdmin.from("profiles").select("email").eq("username", data.username).maybeSingle();
+    const email = prof?.email || usernameToEmail(data.username);
+    const sb = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_PUBLISHABLE_KEY!, {
+      auth: { persistSession: false, autoRefreshToken: false, storage: undefined },
+    });
+    const { data: res, error } = await sb.auth.signInWithPassword({ email, password: data.password });
+    if (error || !res.session) return { ok: false as const, banned: /banned/i.test(error?.message ?? "") };
+    return {
+      ok: true as const,
+      access_token: res.session.access_token,
+      refresh_token: res.session.refresh_token,
+    };
   });
