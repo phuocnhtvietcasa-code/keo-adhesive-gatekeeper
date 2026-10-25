@@ -182,7 +182,7 @@ export const signInWithUsername = createServerFn({ method: "POST" })
     const { createClient } = await import("@supabase/supabase-js");
     const { data: prof } = await supabaseAdmin.from("profiles").select("email").eq("username", data.username).maybeSingle();
     const email = prof?.email || usernameToEmail(data.username);
-    const sb = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_PUBLISHABLE_KEY!, {
+    const sb = createClient(process.env["SUPABASE_URL"]!, process.env["SUPABASE_PUBLISHABLE_KEY"]!, {
       auth: { persistSession: false, autoRefreshToken: false, storage: undefined },
     });
     const { data: res, error } = await sb.auth.signInWithPassword({ email, password: data.password });
