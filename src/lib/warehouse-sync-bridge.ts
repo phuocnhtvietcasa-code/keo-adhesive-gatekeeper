@@ -9,6 +9,8 @@ type GitHubConfig = {
   branch?: string;
   mode?: string;
   dataPath?: string;
+  filePath?: string;
+  token?: string;
   tokenEnc?: string;
   embedConfig?: boolean;
   [key: string]: unknown;
@@ -55,6 +57,7 @@ type WarehouseWindow = Window & {
 export function bootstrapWarehouseSync() {
   const frameWindow = window as WarehouseWindow;
   const originalGetConfig = CloudSync.getConfig.bind(CloudSync);
+  const originalGetToken = CloudSync.getToken.bind(CloudSync);
   const originalSaveConfig = CloudSync.saveConfig.bind(CloudSync);
   const originalToast = frameWindow.toast?.bind(window);
   const originalCloseModal = frameWindow.closeModal?.bind(window);
@@ -75,6 +78,7 @@ export function bootstrapWarehouseSync() {
   const disabledState = new WeakMap<HTMLButtonElement | HTMLInputElement, boolean>();
   const queuedToasts: Array<{ message: string; type?: string }> = [];
   const apiRoot = "https://api.github.com";
+  const requestTimeoutMs = 45_000;
   let syncStatus: SyncStatus = "syncing";
   let statusDetail = "Đang tải dữ liệu mới nhất từ GitHub";
   let remoteReady = false;
@@ -95,12 +99,59 @@ export function bootstrapWarehouseSync() {
   const isRecord = (value: unknown): value is Record<string, unknown> =>
     Boolean(value) && typeof value === "object" && !Array.isArray(value);
   const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
-  const normalizedConfig = (config: GitHubConfig): GitHubConfig => ({
-    ...config,
-    mode: "repo",
-    dataPath: "kho-data.json",
-    syncHtmlToo: false,
-  });
+  const normalizedConfig = (config: GitHubConfig): GitHubConfig => {
+    const storedConfig = { ...config };
+    delete storedConfig.filePath;
+    delete storedConfig.token;
+    const dataPath = config.filePath || config.dataPath || "kho-data.json";
+    const tokenEnc = config.tokenEnc || (config.token?.startsWith("WV_ENC3:") ? config.token : undefined);
+    return {
+      ...storedConfig,
+      ...(tokenEnc ? { tokenEnc } : {}),
+      mode: "repo",
+      dataPath,
+      syncHtmlToo: false,
+    };
+  };
+
+  function getToken(config = getConfig()) {
+    const storedToken = config.tokenEnc || (config.token?.startsWith("WV_ENC3:") ? config.token : undefined);
+    if (typeof storedToken === "string" && storedToken) {
+      try {
+        if (storedToken.startsWith("WV_ENC3:")) {
+          const binary = atob(storedToken.slice(8));
+          const bytes = new Uint8Array(binary.length);
+          const salt = new TextEncoder().encode("WebondVietcasa@KhoKeo2026!SecureStore");
+          for (let index = 0; index < binary.length; index += 1) {
+            bytes[index] = binary.charCodeAt(index) ^ salt[index % salt.length];
+          }
+          const decoded = new TextDecoder().decode(bytes);
+          const parsed: unknown = JSON.parse(decoded);
+          if (typeof parsed === "string") return parsed;
+        }
+        const parsed: unknown = JSON.parse(storedToken);
+        if (typeof parsed === "string") return parsed;
+      } catch {
+        // Older configurations may contain a plaintext token.
+      }
+      if (!storedToken.startsWith("WV_ENC3:")) return storedToken;
+    }
+    return originalGetToken(config);
+  }
+
+  function formatSyncTimestamp(date = new Date()) {
+    const parts = new Intl.DateTimeFormat("vi-VN", {
+      timeZone: "Asia/Ho_Chi_Minh",
+      hour: "2-digit",
+      minute: "2-digit",
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hourCycle: "h23",
+    }).formatToParts(date);
+    const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((value) => value.type === type)?.value || "";
+    return `Cập nhật lúc ${part("hour")}:${part("minute")} ${part("day")}/${part("month")}/${part("year")}`;
+  }
 
   function getConfig() {
     const config = normalizedConfig(originalGetConfig());
@@ -119,13 +170,13 @@ export function bootstrapWarehouseSync() {
   }
 
   function hasWriteAccess(config = getConfig()) {
-    return Boolean(config.owner && config.repo && CloudSync.getToken(config));
+    return Boolean(config.owner && config.repo && getToken(config));
   }
 
   function reportToParent() {
     try {
       window.parent.postMessage(
-        { type: "warehouse-github-sync", status: syncStatus, ready: remoteReady },
+        { type: "warehouse-github-sync", status: syncStatus, ready: remoteReady, detail: statusDetail },
         window.location.origin,
       );
     } catch {
@@ -168,7 +219,7 @@ export function bootstrapWarehouseSync() {
     const labels: Record<SyncStatus, string> = {
       syncing: "Đang đồng bộ...",
       ok: "Đã đồng bộ",
-      error: "Mất Wi-Fi / Lỗi đồng bộ",
+      error: "Lỗi đồng bộ",
     };
     const dot = document.getElementById("syncDot");
     const text = document.getElementById("syncTxt");
@@ -197,12 +248,13 @@ export function bootstrapWarehouseSync() {
   }
 
   function repoFileUrl(config = getConfig()) {
-    const path = "kho-data.json";
-    return `${apiRoot}/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/${path}?ref=${encodeURIComponent(config.branch || "main")}&_=${Date.now()}`;
+    const path = (config.filePath || config.dataPath || "kho-data.json").replace(/^\/+/, "");
+    const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+    return `${apiRoot}/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/${encodedPath}?ref=${encodeURIComponent(config.branch || "main")}&_=${Date.now()}`;
   }
 
   function requestHeaders(config = getConfig()) {
-    const token = CloudSync.getToken(config);
+    const token = getToken(config);
     return {
       Accept: "application/vnd.github+json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -224,21 +276,26 @@ export function bootstrapWarehouseSync() {
       sha?: string;
       encoding?: string;
       content?: string;
-      download_url?: string;
     };
     if (!metadata.sha) throw new Error("GitHub không trả về SHA của kho-data.json.");
-    let content = "";
-    if (metadata.content && metadata.encoding === "base64") {
-      const binary = atob(metadata.content.replace(/\s/g, ""));
-      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-      content = new TextDecoder().decode(bytes);
-    } else if (metadata.download_url) {
-      const rawResponse = await fetch(`${metadata.download_url}?_=${Date.now()}`, { cache: "no-store", signal });
-      if (!rawResponse.ok) throw new Error(`Không tải được kho-data.json: HTTP ${rawResponse.status}`);
-      content = await rawResponse.text();
-    } else {
-      throw new Error("GitHub không trả về nội dung kho-data.json.");
+    let encodedContent = metadata.content?.replace(/\s/g, "") || "";
+    if (!encodedContent || metadata.encoding !== "base64") {
+      const blobUrl = `${apiRoot}/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/git/blobs/${encodeURIComponent(metadata.sha)}?_=${Date.now()}`;
+      const blobResponse = await fetch(blobUrl, {
+        headers: requestHeaders(config),
+        cache: "no-store",
+        signal,
+      });
+      if (!blobResponse.ok) throw new Error(`GitHub HTTP ${blobResponse.status}`);
+      const blob = (await blobResponse.json()) as { content?: string; encoding?: string };
+      encodedContent = blob.content?.replace(/\s/g, "") || "";
+      if (!encodedContent || blob.encoding !== "base64") {
+        throw new Error("GitHub không trả về nội dung kho-data.json.");
+      }
     }
+    const binary = atob(encodedContent);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const content = new TextDecoder("utf-8").decode(bytes);
     const data = JSON.parse(content) as WarehouseData;
     if (!valid(data)) throw new Error("kho-data.json không đúng cấu trúc dữ liệu kho.");
     return { data, sha: metadata.sha };
@@ -343,14 +400,15 @@ export function bootstrapWarehouseSync() {
     return mergeValue(base, local, remote) as WarehouseData;
   }
 
-  async function putRemote(data: WarehouseData, sha: string) {
+  async function putRemote(data: WarehouseData, sha: string, signal?: AbortSignal) {
     assertOnline();
     const config = getConfig();
-    const token = CloudSync.getToken(config);
+    const token = getToken(config);
     if (!token) throw new Error("Cần GitHub Token có quyền ghi repository để lưu dữ liệu.");
     const response = await fetch(repoFileUrl(config).split("?")[0], {
       method: "PUT",
       cache: "no-store",
+      signal,
       headers: {
         ...requestHeaders(config),
         "Content-Type": "application/json",
@@ -366,7 +424,7 @@ export function bootstrapWarehouseSync() {
       let message = `GitHub HTTP ${response.status}`;
       try {
         const body = (await response.json()) as { message?: string };
-        if (body.message) message = body.message;
+        if (body.message) message = `${message}: ${body.message}`;
       } catch {
         // Keep the HTTP status when the API response has no JSON body.
       }
@@ -394,14 +452,34 @@ export function bootstrapWarehouseSync() {
     lastActionButton = null;
   }
 
+  function refreshWarehouseUi() {
+    originalRenderers.rerender?.([]);
+    const refreshChrome = (window as unknown as Record<string, unknown>).refreshChrome;
+    const refreshSave = (window as unknown as Record<string, unknown>).refreshSave;
+    if (typeof refreshChrome === "function") refreshChrome();
+    if (typeof refreshSave === "function") refreshSave();
+  }
+
+  function hydrateWarehouseData(data: WarehouseData, includeLocalConfig = false) {
+    latestRemote = clone(data);
+    const hydrated = clone(data);
+    const localConfig = getConfig();
+    if (includeLocalConfig && (localConfig.owner || localConfig.repo || localConfig.tokenEnc || localConfig.token)) {
+      hydrated.ghSync = { ...((hydrated.ghSync as Record<string, unknown> | undefined) || {}), ...localConfig };
+    }
+    S = hydrated;
+    baseData = clone(data);
+    remoteReady = true;
+    frameWindow.__warehouseRemoteDataLoaded = true;
+    persist(S);
+    refreshWarehouseUi();
+  }
+
   function runDeferredUi(success: boolean) {
     busy = false;
     restoreButtonLoading();
     if (success) {
-      setStatus(
-        navigator.onLine ? "ok" : "error",
-        navigator.onLine ? "Đã lưu lên kho-data.json" : "Mất kết nối Wi-Fi.",
-      );
+      setStatus("ok", formatSyncTimestamp());
       const refreshChrome = (window as unknown as Record<string, unknown>).refreshChrome;
       const refreshSave = (window as unknown as Record<string, unknown>).refreshSave;
       if (typeof refreshChrome === "function") refreshChrome();
@@ -435,31 +513,17 @@ export function bootstrapWarehouseSync() {
       try {
         const { data } = await fetchLatestRemote(signal);
         assertOnline();
-        latestRemote = clone(data);
-        const localConfig = getConfig();
-        const remoteState = clone(data);
-        if (localConfig.owner || localConfig.repo || localConfig.tokenEnc) {
-          remoteState.ghSync = { ...((remoteState.ghSync as Record<string, unknown> | undefined) || {}), ...localConfig };
-        }
-        S = remoteState;
-        baseData = clone(data);
-        remoteReady = true;
-        frameWindow.__warehouseRemoteDataLoaded = true;
-        persist(S);
-        const rerender = originalRenderers.rerender;
-        rerender?.([]);
-        const refreshChrome = (window as unknown as Record<string, unknown>).refreshChrome;
-        const refreshSave = (window as unknown as Record<string, unknown>).refreshSave;
-        if (typeof refreshChrome === "function") refreshChrome();
-        if (typeof refreshSave === "function") refreshSave();
+        hydrateWarehouseData(data, true);
         if (!hasWriteAccess()) {
           setStatus("error", "Cần GitHub Token có quyền ghi repository.");
           return false;
         }
-        setStatus("ok", "Đã tải dữ liệu mới nhất từ kho-data.json");
+        setStatus("ok", formatSyncTimestamp());
         return true;
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Lỗi kết nối GitHub";
+        const message = signal?.aborted
+          ? `GitHub request timed out after ${Math.round(requestTimeoutMs / 1000)} seconds.`
+          : error instanceof Error ? error.message : "Lỗi kết nối GitHub";
         setStatus("error", message);
         return false;
       } finally {
@@ -471,12 +535,12 @@ export function bootstrapWarehouseSync() {
 
   async function runInitialSync() {
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 8_000);
+    const timeoutId = window.setTimeout(() => controller.abort(), requestTimeoutMs);
     try {
       if (!navigator.onLine) throw new Error("Mất kết nối Wi-Fi.");
       const config = getConfig();
       if (!config.owner || !config.repo) throw configError() || new Error("Hãy cấu hình GitHub Repository trước khi đồng bộ.");
-      if (!CloudSync.getToken(config)) throw new Error("Cần GitHub Token có quyền ghi repository.");
+      if (!getToken(config)) throw new Error("Cần GitHub Token có quyền ghi repository.");
       await CloudSync.pullLatest({ manual: false, signal: controller.signal });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Không tải được dữ liệu mới nhất từ GitHub.";
@@ -505,6 +569,8 @@ export function bootstrapWarehouseSync() {
     }
     const baseSnapshot = clone(baseData as WarehouseData);
     const localSnapshot = clone(S);
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), requestTimeoutMs);
     busy = true;
     installButtonLoading();
     setStatus("syncing", "Đang đồng bộ...");
@@ -512,18 +578,13 @@ export function bootstrapWarehouseSync() {
     commitPromise = (async () => {
       try {
         for (let attempt = 0; attempt < 3; attempt += 1) {
-          const latest = await fetchLatestRemote();
+          const latest = await fetchLatestRemote(controller.signal);
           latestRemote = clone(latest.data);
           const merged = mergeData(baseSnapshot, localSnapshot, latest.data);
           try {
-            await putRemote(merged, latest.sha);
-            S = merged;
-            baseData = clone(merged);
-            latestRemote = clone(merged);
-            remoteReady = true;
-            frameWindow.__warehouseRemoteDataLoaded = true;
+            await putRemote(merged, latest.sha, controller.signal);
+            hydrateWarehouseData(merged, true);
             DIRTY = false;
-            persist(S);
             runDeferredUi(true);
             return true;
           } catch (error) {
@@ -534,7 +595,9 @@ export function bootstrapWarehouseSync() {
         }
         throw new Error("GitHub từ chối cập nhật sau nhiều lần thử. Hãy đồng bộ lại.");
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Lỗi đồng bộ GitHub";
+        const message = controller.signal.aborted
+          ? `GitHub request timed out after ${Math.round(requestTimeoutMs / 1000)} seconds.`
+          : error instanceof Error ? error.message : "Lỗi đồng bộ GitHub";
         if (latestRemote) {
           S = clone(latestRemote);
           baseData = clone(latestRemote);
@@ -546,6 +609,7 @@ export function bootstrapWarehouseSync() {
         runDeferredUi(false);
         return false;
       } finally {
+        window.clearTimeout(timeoutId);
         commitPromise = null;
         if (retryAfterOnline && navigator.onLine) {
           retryAfterOnline = false;
@@ -557,6 +621,7 @@ export function bootstrapWarehouseSync() {
   }
 
   CloudSync.getConfig = getConfig;
+  CloudSync.getToken = getToken;
   CloudSync.saveConfig = (config: GitHubConfig) => {
     originalSaveConfig(normalizedConfig(config));
     setStatus(syncStatus, statusDetail);

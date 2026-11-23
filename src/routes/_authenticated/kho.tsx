@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import { TopBar } from "@/components/TopBar";
 import { wrapWarehouseHtml } from "@/lib/warehouse-sync-bridge";
 
+const INITIAL_SYNC_TIMEOUT_MS = 60_000;
+
 export const Route = createFileRoute("/_authenticated/kho")({
   head: () => ({
     meta: [
@@ -20,6 +22,7 @@ function KhoPage() {
   const initialLoadingRef = useRef(true);
   const [frameHtml, setFrameHtml] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<"syncing" | "ok" | "error">("syncing");
+  const [syncError, setSyncError] = useState("");
   const [initialLoading, setInitialLoading] = useState(true);
 
   useEffect(() => {
@@ -32,8 +35,13 @@ function KhoPage() {
       .then((source) => {
         if (active) setFrameHtml(wrapWarehouseHtml(source));
       })
-      .catch(() => {
-        if (active) setSyncStatus("error");
+      .catch((error: unknown) => {
+        if (active) {
+          initialLoadingRef.current = false;
+          setInitialLoading(false);
+          setSyncStatus("error");
+          setSyncError(error instanceof Error ? error.message : "Không thể tải ứng dụng kho.");
+        }
       });
     return () => {
       active = false;
@@ -46,7 +54,8 @@ function KhoPage() {
       initialLoadingRef.current = false;
       setInitialLoading(false);
       setSyncStatus("error");
-    }, 8_000);
+      setSyncError("Không nhận được phản hồi đồng bộ từ GitHub.");
+    }, INITIAL_SYNC_TIMEOUT_MS);
 
     return () => window.clearTimeout(timeoutId);
   }, []);
@@ -65,10 +74,14 @@ function KhoPage() {
         initialLoadingRef.current = false;
         setInitialLoading(false);
         setSyncStatus("ok");
+        setSyncError("");
       } else if (event.data.status === "error") {
         initialLoadingRef.current = false;
         setInitialLoading(false);
         setSyncStatus("error");
+        setSyncError(typeof event.data.detail === "string" && event.data.detail
+          ? event.data.detail
+          : "Không tải được dữ liệu mới nhất từ GitHub.");
       } else if (event.data.status === "syncing") {
         setSyncStatus((current) => current === "error" ? "error" : "syncing");
       }
@@ -86,7 +99,7 @@ function KhoPage() {
           role="alert"
           className="z-20 shrink-0 bg-red-700 px-4 py-3 text-center text-sm font-bold text-white shadow-md sm:text-base"
         >
-          Mất kết nối Wi-Fi / Không tải được dữ liệu mới nhất từ GitHub
+          {syncError || "Không tải được dữ liệu mới nhất từ GitHub."}
         </div>
       )}
       <div className="relative min-h-0 flex-1">
