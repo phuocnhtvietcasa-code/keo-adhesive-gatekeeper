@@ -133,6 +133,11 @@ export function bootstrapWarehouseSync() {
     }
   }
 
+  window.addEventListener("message", (event: MessageEvent) => {
+    if (event.source !== window.parent || event.data?.type !== "warehouse-github-sync-handshake") return;
+    reportToParent();
+  });
+
   function isSubmitControl(element: Element): element is HTMLButtonElement | HTMLInputElement {
     if (!(element instanceof HTMLButtonElement || element instanceof HTMLInputElement)) return false;
     if (element instanceof HTMLButtonElement && element.type === "submit") return true;
@@ -204,7 +209,7 @@ export function bootstrapWarehouseSync() {
     };
   }
 
-  async function fetchLatestRemote() {
+  async function fetchLatestRemote(signal?: AbortSignal) {
     assertOnline();
     const config = getConfig();
     const setupError = configError();
@@ -212,6 +217,7 @@ export function bootstrapWarehouseSync() {
     const response = await fetch(repoFileUrl(config), {
       headers: requestHeaders(config),
       cache: "no-store",
+      signal,
     });
     if (!response.ok) throw new Error(`GitHub HTTP ${response.status}`);
     const metadata = (await response.json()) as {
@@ -227,7 +233,7 @@ export function bootstrapWarehouseSync() {
       const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
       content = new TextDecoder().decode(bytes);
     } else if (metadata.download_url) {
-      const rawResponse = await fetch(`${metadata.download_url}?_=${Date.now()}`, { cache: "no-store" });
+      const rawResponse = await fetch(`${metadata.download_url}?_=${Date.now()}`, { cache: "no-store", signal });
       if (!rawResponse.ok) throw new Error(`Không tải được kho-data.json: HTTP ${rawResponse.status}`);
       content = await rawResponse.text();
     } else {
@@ -420,13 +426,14 @@ export function bootstrapWarehouseSync() {
     }
   }
 
-  async function pullLatest() {
+  async function pullLatest(options?: Record<string, unknown>) {
     if (busy) return false;
     if (pullPromise) return pullPromise;
     setStatus("syncing", "Đang tải dữ liệu mới nhất từ GitHub");
+    const signal = options?.signal as AbortSignal | undefined;
     pullPromise = (async () => {
       try {
-        const { data } = await fetchLatestRemote();
+        const { data } = await fetchLatestRemote(signal);
         assertOnline();
         latestRemote = clone(data);
         const localConfig = getConfig();
@@ -460,6 +467,27 @@ export function bootstrapWarehouseSync() {
       }
     })();
     return pullPromise;
+  }
+
+  async function runInitialSync() {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 8_000);
+    try {
+      if (!navigator.onLine) throw new Error("Mất kết nối Wi-Fi.");
+      const config = getConfig();
+      if (!config.owner || !config.repo) throw configError() || new Error("Hãy cấu hình GitHub Repository trước khi đồng bộ.");
+      if (!CloudSync.getToken(config)) throw new Error("Cần GitHub Token có quyền ghi repository.");
+      await CloudSync.pullLatest({ manual: false, signal: controller.signal });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Không tải được dữ liệu mới nhất từ GitHub.";
+      setStatus("error", message);
+    } finally {
+      window.clearTimeout(timeoutId);
+      if (syncStatus === "syncing") {
+        setStatus("error", "Không tải được dữ liệu mới nhất từ GitHub.");
+      }
+      reportToParent();
+    }
   }
 
   async function commitLatest() {
@@ -636,7 +664,7 @@ export function bootstrapWarehouseSync() {
   if (!navigator.onLine) setStatus("error", "Mất kết nối Wi-Fi.");
   else setStatus("syncing", "Đang tải dữ liệu mới nhất từ GitHub");
   refreshButtonLock();
-  void CloudSync.pullLatest({ manual: false });
+  void runInitialSync();
 }
 
 export function wrapWarehouseHtml(source: string) {

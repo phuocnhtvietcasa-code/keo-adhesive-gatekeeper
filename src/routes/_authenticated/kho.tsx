@@ -17,9 +17,10 @@ export const Route = createFileRoute("/_authenticated/kho")({
 
 function KhoPage() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const initialLoadingRef = useRef(true);
   const [frameHtml, setFrameHtml] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<"syncing" | "ok" | "error">("syncing");
-  const [remoteReady, setRemoteReady] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
 
   useEffect(() => {
     let active = true;
@@ -40,17 +41,42 @@ function KhoPage() {
   }, []);
 
   useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      if (!initialLoadingRef.current) return;
+      initialLoadingRef.current = false;
+      setInitialLoading(false);
+      setSyncStatus("error");
+    }, 8_000);
+
+    return () => window.clearTimeout(timeoutId);
+  }, []);
+
+  useEffect(() => {
+    const requestBridgeStatus = () => {
+      iframeRef.current?.contentWindow?.postMessage(
+        { type: "warehouse-github-sync-handshake" },
+        window.location.origin,
+      );
+    };
     const onMessage = (event: MessageEvent) => {
       if (event.source !== iframeRef.current?.contentWindow) return;
       if (!event.data || event.data.type !== "warehouse-github-sync") return;
-      if (event.data.status === "ok" || event.data.status === "syncing" || event.data.status === "error") {
-        setSyncStatus(event.data.status);
+      if (event.data.status === "ok") {
+        initialLoadingRef.current = false;
+        setInitialLoading(false);
+        setSyncStatus("ok");
+      } else if (event.data.status === "error") {
+        initialLoadingRef.current = false;
+        setInitialLoading(false);
+        setSyncStatus("error");
+      } else if (event.data.status === "syncing") {
+        setSyncStatus((current) => current === "error" ? "error" : "syncing");
       }
-      if (typeof event.data.ready === "boolean") setRemoteReady(event.data.ready);
     };
     window.addEventListener("message", onMessage);
+    requestBridgeStatus();
     return () => window.removeEventListener("message", onMessage);
-  }, []);
+  }, [frameHtml]);
 
   return (
     <div className="flex h-screen flex-col">
@@ -60,7 +86,7 @@ function KhoPage() {
           role="alert"
           className="z-20 shrink-0 bg-red-700 px-4 py-3 text-center text-sm font-bold text-white shadow-md sm:text-base"
         >
-          Mất kết nối Wi-Fi — Không thể lưu dữ liệu, vui lòng kiểm tra lại mạng!
+          Mất kết nối Wi-Fi / Không tải được dữ liệu mới nhất từ GitHub
         </div>
       )}
       <div className="relative min-h-0 flex-1">
@@ -70,9 +96,15 @@ function KhoPage() {
             srcDoc={frameHtml}
             title="Quản lý kho"
             className="h-full w-full border-0"
+            onLoad={() => {
+              iframeRef.current?.contentWindow?.postMessage(
+                { type: "warehouse-github-sync-handshake" },
+                window.location.origin,
+              );
+            }}
           />
         )}
-        {frameHtml && !remoteReady && syncStatus !== "error" && (
+        {frameHtml && initialLoading && (
           <div className="absolute inset-0 z-10 grid place-items-center bg-background/90 text-sm font-semibold text-foreground">
             Đang tải dữ liệu kho mới nhất từ GitHub...
           </div>
