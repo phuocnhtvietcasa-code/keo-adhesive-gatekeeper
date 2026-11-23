@@ -81,6 +81,7 @@ export function bootstrapWarehouseSync() {
   const requestTimeoutMs = 45_000;
   let syncStatus: SyncStatus = "syncing";
   let statusDetail = "Đang tải dữ liệu mới nhất từ GitHub";
+  let apiRequestFailed = false;
   let remoteReady = false;
   let busy = false;
   let pullPromise: Promise<boolean> | null = null;
@@ -176,7 +177,13 @@ export function bootstrapWarehouseSync() {
   function reportToParent() {
     try {
       window.parent.postMessage(
-        { type: "warehouse-github-sync", status: syncStatus, ready: remoteReady, detail: statusDetail },
+        {
+          type: "warehouse-github-sync",
+          status: syncStatus,
+          ready: remoteReady,
+          detail: statusDetail,
+          apiFailure: apiRequestFailed,
+        },
         window.location.origin,
       );
     } catch {
@@ -213,9 +220,10 @@ export function bootstrapWarehouseSync() {
     });
   }
 
-  function setStatus(status: SyncStatus, detail = "") {
+  function setStatus(status: SyncStatus, detail = "", isApiFailure = false) {
     syncStatus = status;
     statusDetail = detail;
+    apiRequestFailed = status === "error" && isApiFailure;
     const labels: Record<SyncStatus, string> = {
       syncing: "Đang đồng bộ...",
       ok: "Đã đồng bộ",
@@ -261,33 +269,76 @@ export function bootstrapWarehouseSync() {
     };
   }
 
+  function apiRequestFailure(error: unknown) {
+    if (error instanceof Error && (error.name === "AbortError" || error.name === "SyntaxError")) return error;
+    const failure = new Error(error instanceof Error ? error.message : "GitHub network request failed") as Error & {
+      apiFailure: boolean;
+    };
+    failure.apiFailure = true;
+    return failure;
+  }
+
+  function githubHttpFailure(status: number, message?: string) {
+    const error = new Error(`GitHub HTTP ${status}${message ? `: ${message}` : ""}`) as Error & {
+      apiFailure: boolean;
+      status: number;
+    };
+    error.apiFailure = true;
+    error.status = status;
+    return error;
+  }
+
+  function isApiRequestFailure(error: unknown): error is Error & { apiFailure: true; status?: number } {
+    return Boolean(error && typeof error === "object" && "apiFailure" in error && error.apiFailure === true);
+  }
+
   async function fetchLatestRemote(signal?: AbortSignal) {
     assertOnline();
     const config = getConfig();
     const setupError = configError();
     if (setupError) throw setupError;
-    const response = await fetch(repoFileUrl(config), {
-      headers: requestHeaders(config),
-      cache: "no-store",
-      signal,
-    });
-    if (!response.ok) throw new Error(`GitHub HTTP ${response.status}`);
-    const metadata = (await response.json()) as {
-      sha?: string;
-      encoding?: string;
-      content?: string;
-    };
-    if (!metadata.sha) throw new Error("GitHub không trả về SHA của kho-data.json.");
-    let encodedContent = metadata.content?.replace(/\s/g, "") || "";
-    if (!encodedContent || metadata.encoding !== "base64") {
-      const blobUrl = `${apiRoot}/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/git/blobs/${encodeURIComponent(metadata.sha)}?_=${Date.now()}`;
-      const blobResponse = await fetch(blobUrl, {
+    let response: Response;
+    try {
+      response = await fetch(repoFileUrl(config), {
         headers: requestHeaders(config),
         cache: "no-store",
         signal,
       });
-      if (!blobResponse.ok) throw new Error(`GitHub HTTP ${blobResponse.status}`);
-      const blob = (await blobResponse.json()) as { content?: string; encoding?: string };
+    } catch (error) {
+      throw apiRequestFailure(error);
+    }
+    if (!response.ok) throw githubHttpFailure(response.status);
+    let metadata: {
+      sha?: string;
+      encoding?: string;
+      content?: string;
+    };
+    try {
+      metadata = (await response.json()) as typeof metadata;
+    } catch (error) {
+      throw apiRequestFailure(error);
+    }
+    if (!metadata.sha) throw new Error("GitHub không trả về SHA của kho-data.json.");
+    let encodedContent = metadata.content?.replace(/\s/g, "") || "";
+    if (!encodedContent || metadata.encoding !== "base64") {
+      const blobUrl = `${apiRoot}/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/git/blobs/${encodeURIComponent(metadata.sha)}?_=${Date.now()}`;
+      let blobResponse: Response;
+      try {
+        blobResponse = await fetch(blobUrl, {
+          headers: requestHeaders(config),
+          cache: "no-store",
+          signal,
+        });
+      } catch (error) {
+        throw apiRequestFailure(error);
+      }
+      if (!blobResponse.ok) throw githubHttpFailure(blobResponse.status);
+      let blob: { content?: string; encoding?: string };
+      try {
+        blob = (await blobResponse.json()) as typeof blob;
+      } catch (error) {
+        throw apiRequestFailure(error);
+      }
       encodedContent = blob.content?.replace(/\s/g, "") || "";
       if (!encodedContent || blob.encoding !== "base64") {
         throw new Error("GitHub không trả về nội dung kho-data.json.");
@@ -405,32 +456,35 @@ export function bootstrapWarehouseSync() {
     const config = getConfig();
     const token = getToken(config);
     if (!token) throw new Error("Cần GitHub Token có quyền ghi repository để lưu dữ liệu.");
-    const response = await fetch(repoFileUrl(config).split("?")[0], {
-      method: "PUT",
-      cache: "no-store",
-      signal,
-      headers: {
-        ...requestHeaders(config),
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        message: `Cập nhật dữ liệu kho (${new Date().toLocaleString("vi-VN")})`,
-        content: utf8ToBase64(JSON.stringify(data)),
-        sha,
-        branch: config.branch || "main",
-      }),
-    });
+    let response: Response;
+    try {
+      response = await fetch(repoFileUrl(config).split("?")[0], {
+        method: "PUT",
+        cache: "no-store",
+        signal,
+        headers: {
+          ...requestHeaders(config),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          message: `Cập nhật dữ liệu kho (${new Date().toLocaleString("vi-VN")})`,
+          content: utf8ToBase64(JSON.stringify(data)),
+          sha,
+          branch: config.branch || "main",
+        }),
+      });
+    } catch (error) {
+      throw apiRequestFailure(error);
+    }
     if (response.status !== 200 && response.status !== 201) {
-      let message = `GitHub HTTP ${response.status}`;
+      let message: string | undefined;
       try {
         const body = (await response.json()) as { message?: string };
-        if (body.message) message = `${message}: ${body.message}`;
+        if (body.message) message = body.message;
       } catch {
         // Keep the HTTP status when the API response has no JSON body.
       }
-      const error = new Error(message) as Error & { status?: number };
-      error.status = response.status;
-      throw error;
+      throw githubHttpFailure(response.status, message);
     }
     return;
   }
@@ -475,7 +529,7 @@ export function bootstrapWarehouseSync() {
     refreshWarehouseUi();
   }
 
-  function runDeferredUi(success: boolean) {
+  function runDeferredUi(success: boolean, isApiFailure = false) {
     busy = false;
     restoreButtonLoading();
     if (success) {
@@ -489,7 +543,7 @@ export function bootstrapWarehouseSync() {
       if (printAfterCommit) originalPrintDoc?.(printAfterCommit);
       queuedToasts.splice(0).forEach(({ message, type }) => originalToast?.(message, type));
     } else {
-      setStatus("error", statusDetail || "Lỗi đồng bộ GitHub");
+      setStatus("error", statusDetail || "Lỗi đồng bộ GitHub", isApiFailure);
       if (renderAfterCommit && originalRenderers.rerender) originalRenderers.rerender([]);
       originalCloseModal?.();
       queuedToasts.length = 0;
@@ -524,7 +578,7 @@ export function bootstrapWarehouseSync() {
         const message = signal?.aborted
           ? `GitHub request timed out after ${Math.round(requestTimeoutMs / 1000)} seconds.`
           : error instanceof Error ? error.message : "Lỗi kết nối GitHub";
-        setStatus("error", message);
+        setStatus("error", message, isApiRequestFailure(error));
         return false;
       } finally {
         pullPromise = null;
@@ -544,7 +598,7 @@ export function bootstrapWarehouseSync() {
       await CloudSync.pullLatest({ manual: false, signal: controller.signal });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Không tải được dữ liệu mới nhất từ GitHub.";
-      setStatus("error", message);
+      setStatus("error", message, isApiRequestFailure(error));
     } finally {
       window.clearTimeout(timeoutId);
       if (syncStatus === "syncing") {
@@ -606,7 +660,7 @@ export function bootstrapWarehouseSync() {
         }
         if (S) persist(S);
         statusDetail = message;
-        runDeferredUi(false);
+        runDeferredUi(false, isApiRequestFailure(error));
         return false;
       } finally {
         window.clearTimeout(timeoutId);

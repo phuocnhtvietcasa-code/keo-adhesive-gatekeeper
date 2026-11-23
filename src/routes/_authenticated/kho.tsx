@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { TopBar } from "@/components/TopBar";
 import { wrapWarehouseHtml } from "@/lib/warehouse-sync-bridge";
 
-const INITIAL_SYNC_TIMEOUT_MS = 60_000;
+const OFFLINE_BANNER_MESSAGE = "Mất kết nối Wi-Fi — Không thể lưu dữ liệu, vui lòng kiểm tra lại mạng!";
 
 export const Route = createFileRoute("/_authenticated/kho")({
   head: () => ({
@@ -19,11 +19,10 @@ export const Route = createFileRoute("/_authenticated/kho")({
 
 function KhoPage() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const initialLoadingRef = useRef(true);
   const [frameHtml, setFrameHtml] = useState<string | null>(null);
-  const [syncStatus, setSyncStatus] = useState<"syncing" | "ok" | "error">("syncing");
-  const [syncError, setSyncError] = useState("");
-  const [initialLoading, setInitialLoading] = useState(true);
+  const [frameError, setFrameError] = useState("");
+  const [githubError, setGithubError] = useState("");
+  const [isOnline, setIsOnline] = useState(true);
 
   useEffect(() => {
     let active = true;
@@ -33,14 +32,14 @@ function KhoPage() {
         return response.text();
       })
       .then((source) => {
-        if (active) setFrameHtml(wrapWarehouseHtml(source));
+        if (active) {
+          setFrameError("");
+          setFrameHtml(wrapWarehouseHtml(source));
+        }
       })
       .catch((error: unknown) => {
         if (active) {
-          initialLoadingRef.current = false;
-          setInitialLoading(false);
-          setSyncStatus("error");
-          setSyncError(error instanceof Error ? error.message : "Không thể tải ứng dụng kho.");
+          setFrameError(error instanceof Error ? error.message : "Không thể tải ứng dụng kho.");
         }
       });
     return () => {
@@ -49,15 +48,14 @@ function KhoPage() {
   }, []);
 
   useEffect(() => {
-    const timeoutId = window.setTimeout(() => {
-      if (!initialLoadingRef.current) return;
-      initialLoadingRef.current = false;
-      setInitialLoading(false);
-      setSyncStatus("error");
-      setSyncError("Không nhận được phản hồi đồng bộ từ GitHub.");
-    }, INITIAL_SYNC_TIMEOUT_MS);
-
-    return () => window.clearTimeout(timeoutId);
+    const updateOnlineState = () => setIsOnline(navigator.onLine);
+    updateOnlineState();
+    window.addEventListener("online", updateOnlineState);
+    window.addEventListener("offline", updateOnlineState);
+    return () => {
+      window.removeEventListener("online", updateOnlineState);
+      window.removeEventListener("offline", updateOnlineState);
+    };
   }, []);
 
   useEffect(() => {
@@ -71,19 +69,11 @@ function KhoPage() {
       if (event.source !== iframeRef.current?.contentWindow) return;
       if (!event.data || event.data.type !== "warehouse-github-sync") return;
       if (event.data.status === "ok") {
-        initialLoadingRef.current = false;
-        setInitialLoading(false);
-        setSyncStatus("ok");
-        setSyncError("");
-      } else if (event.data.status === "error") {
-        initialLoadingRef.current = false;
-        setInitialLoading(false);
-        setSyncStatus("error");
-        setSyncError(typeof event.data.detail === "string" && event.data.detail
+        setGithubError("");
+      } else if (event.data.status === "error" && event.data.apiFailure === true && navigator.onLine) {
+        setGithubError(typeof event.data.detail === "string" && event.data.detail
           ? event.data.detail
-          : "Không tải được dữ liệu mới nhất từ GitHub.");
-      } else if (event.data.status === "syncing") {
-        setSyncStatus((current) => current === "error" ? "error" : "syncing");
+          : "Lỗi yêu cầu GitHub.");
       }
     };
     window.addEventListener("message", onMessage);
@@ -94,37 +84,30 @@ function KhoPage() {
   return (
     <div className="flex h-screen flex-col">
       <TopBar />
-      {syncStatus === "error" && (
+      {(!isOnline || githubError) && (
         <div
           role="alert"
           className="z-20 shrink-0 bg-red-700 px-4 py-3 text-center text-sm font-bold text-white shadow-md sm:text-base"
         >
-          {syncError || "Không tải được dữ liệu mới nhất từ GitHub."}
+          {!isOnline ? OFFLINE_BANNER_MESSAGE : githubError}
         </div>
       )}
       <div className="relative min-h-0 flex-1">
-        {frameHtml && (
-          <iframe
-            ref={iframeRef}
-            srcDoc={frameHtml}
-            title="Quản lý kho"
-            className="h-full w-full border-0"
-            onLoad={() => {
-              iframeRef.current?.contentWindow?.postMessage(
-                { type: "warehouse-github-sync-handshake" },
-                window.location.origin,
-              );
-            }}
-          />
-        )}
-        {frameHtml && initialLoading && (
-          <div className="absolute inset-0 z-10 grid place-items-center bg-background/90 text-sm font-semibold text-foreground">
-            Đang tải dữ liệu kho mới nhất từ GitHub...
-          </div>
-        )}
-        {!frameHtml && syncStatus === "error" && (
+        <iframe
+          ref={iframeRef}
+          srcDoc={frameHtml ?? ""}
+          title="Quản lý kho"
+          className="h-full w-full border-0"
+          onLoad={() => {
+            iframeRef.current?.contentWindow?.postMessage(
+              { type: "warehouse-github-sync-handshake" },
+              window.location.origin,
+            );
+          }}
+        />
+        {!frameHtml && frameError && (
           <div className="grid h-full place-items-center text-sm text-muted-foreground">
-            Không thể tải ứng dụng kho.
+            {frameError}
           </div>
         )}
       </div>
