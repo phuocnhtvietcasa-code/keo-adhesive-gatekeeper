@@ -35,9 +35,14 @@ declare let DIRTY: boolean;
 declare function valid(data: unknown): data is WarehouseData;
 declare function persist(data: WarehouseData): boolean;
 declare function utf8ToBase64(value: string): string;
+declare const Store: {
+  lsSave: (data: WarehouseData) => boolean;
+  idbSave: (data: WarehouseData) => Promise<boolean>;
+};
 
 type WarehouseWindow = Window & {
   closeModal?: () => void;
+  go?: (page: string) => void;
   rerender?: () => void;
   renderTxn?: (...args: unknown[]) => void;
   renderHistory?: (...args: unknown[]) => void;
@@ -51,6 +56,8 @@ type WarehouseWindow = Window & {
   printDoc?: (doc: string) => void;
   toast?: (message: string, type?: string) => void;
   __warehouseRemoteDataLoaded?: boolean;
+  __warehouseRemoteHydrationRequired?: boolean;
+  __warehouseInitialPageRendered?: boolean;
 };
 
 /** This function is serialized into the untouched warehouse HTML at runtime. */
@@ -78,11 +85,14 @@ export function bootstrapWarehouseSync() {
   const disabledState = new WeakMap<HTMLButtonElement | HTMLInputElement, boolean>();
   const queuedToasts: Array<{ message: string; type?: string }> = [];
   const apiRoot = "https://api.github.com";
+  const repository = { owner: "phuocnhtvietcasa-code", repo: "vietcasa-webond-xnt", branch: "main" };
+  const tokenRequiredMessage = "Cần GitHub Token có quyền ghi repository.";
   const requestTimeoutMs = 45_000;
   let syncStatus: SyncStatus = "syncing";
   let statusDetail = "Đang tải dữ liệu mới nhất từ GitHub";
   let apiRequestFailed = false;
-  let remoteReady = false;
+  let isRemoteHydrated = false;
+  let latestCommitTime: Date | null = null;
   let busy = false;
   let pullPromise: Promise<boolean> | null = null;
   let commitPromise: Promise<boolean> | null = null;
@@ -104,13 +114,13 @@ export function bootstrapWarehouseSync() {
     const storedConfig = { ...config };
     delete storedConfig.filePath;
     delete storedConfig.token;
-    const dataPath = config.filePath || config.dataPath || "kho-data.json";
     const tokenEnc = config.tokenEnc || (config.token?.startsWith("WV_ENC3:") ? config.token : undefined);
     return {
       ...storedConfig,
+      ...repository,
       ...(tokenEnc ? { tokenEnc } : {}),
       mode: "repo",
-      dataPath,
+      dataPath: "kho-data.json",
       syncHtmlToo: false,
     };
   };
@@ -151,7 +161,7 @@ export function bootstrapWarehouseSync() {
       hourCycle: "h23",
     }).formatToParts(date);
     const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((value) => value.type === type)?.value || "";
-    return `Cập nhật lúc ${part("hour")}:${part("minute")} ${part("day")}/${part("month")}/${part("year")}`;
+    return `• Cập nhật lúc ${part("hour")}:${part("minute")} ${part("day")}/${part("month")}/${part("year")}`;
   }
 
   function getConfig() {
@@ -180,7 +190,7 @@ export function bootstrapWarehouseSync() {
         {
           type: "warehouse-github-sync",
           status: syncStatus,
-          ready: remoteReady,
+          ready: isRemoteHydrated,
           detail: statusDetail,
           apiFailure: apiRequestFailed,
         },
@@ -205,11 +215,20 @@ export function bootstrapWarehouseSync() {
     return /\b(save|submit|delete|delProduct|delTxn|remove|clear|reset|apply|restore|import|pushLatest)[\w$]*\s*\(/i.test(action);
   }
 
+  function canSaveGitHubConfig(element: HTMLButtonElement | HTMLInputElement) {
+    return (element.getAttribute("onclick") || "").includes("saveAndTestGhSync")
+      && isRemoteHydrated
+      && navigator.onLine
+      && syncStatus === "error"
+      && statusDetail === tokenRequiredMessage
+      && !apiRequestFailed;
+  }
+
   function refreshButtonLock() {
-    const locked = syncStatus !== "ok";
+    const locked = !isRemoteHydrated || !navigator.onLine || syncStatus !== "ok" || apiRequestFailed;
     document.querySelectorAll("button, input[type='button'], input[type='submit'], input[type='file']").forEach((node) => {
       if (!(node instanceof HTMLButtonElement || node instanceof HTMLInputElement) || !isSubmitControl(node)) return;
-      const shouldDisable = locked;
+      const shouldDisable = locked && !canSaveGitHubConfig(node);
       if (shouldDisable) {
         if (!disabledState.has(node)) disabledState.set(node, node.disabled);
         node.disabled = true;
@@ -220,10 +239,10 @@ export function bootstrapWarehouseSync() {
     });
   }
 
-  function setStatus(status: SyncStatus, detail = "", isApiFailure = false) {
+  function setStatus(status: SyncStatus, detail = "", isApiFailure?: boolean) {
     syncStatus = status;
     statusDetail = detail;
-    apiRequestFailed = status === "error" && isApiFailure;
+    apiRequestFailed = status === "error" ? (isApiFailure ?? apiRequestFailed) : false;
     const labels: Record<SyncStatus, string> = {
       syncing: "Đang đồng bộ...",
       ok: "Đã đồng bộ",
@@ -270,7 +289,6 @@ export function bootstrapWarehouseSync() {
   }
 
   function apiRequestFailure(error: unknown) {
-    if (error instanceof Error && (error.name === "AbortError" || error.name === "SyntaxError")) return error;
     const failure = new Error(error instanceof Error ? error.message : "GitHub network request failed") as Error & {
       apiFailure: boolean;
     };
@@ -292,6 +310,17 @@ export function bootstrapWarehouseSync() {
     return Boolean(error && typeof error === "object" && "apiFailure" in error && error.apiFailure === true);
   }
 
+  async function throwGitHubHttpFailure(response: Response): Promise<never> {
+    let message: string | undefined;
+    try {
+      const body = (await response.json()) as { message?: string };
+      if (body.message) message = body.message;
+    } catch {
+      // Preserve the HTTP status when GitHub does not return a JSON error body.
+    }
+    throw githubHttpFailure(response.status, message);
+  }
+
   async function fetchLatestRemote(signal?: AbortSignal) {
     assertOnline();
     const config = getConfig();
@@ -307,20 +336,24 @@ export function bootstrapWarehouseSync() {
     } catch (error) {
       throw apiRequestFailure(error);
     }
-    if (!response.ok) throw githubHttpFailure(response.status);
+    if (!response.ok) await throwGitHubHttpFailure(response);
     let metadata: {
       sha?: string;
       encoding?: string;
       content?: string;
+      size?: number;
     };
     try {
       metadata = (await response.json()) as typeof metadata;
     } catch (error) {
       throw apiRequestFailure(error);
     }
-    if (!metadata.sha) throw new Error("GitHub không trả về SHA của kho-data.json.");
+    if (!metadata || typeof metadata !== "object") {
+      throw apiRequestFailure(new Error("GitHub trả về metadata không hợp lệ cho kho-data.json."));
+    }
+    if (!metadata.sha) throw apiRequestFailure(new Error("GitHub không trả về SHA của kho-data.json."));
     let encodedContent = metadata.content?.replace(/\s/g, "") || "";
-    if (!encodedContent || metadata.encoding !== "base64") {
+    if ((metadata.size || 0) > 1_000_000 || !encodedContent || metadata.encoding !== "base64") {
       const blobUrl = `${apiRoot}/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/git/blobs/${encodeURIComponent(metadata.sha)}?_=${Date.now()}`;
       let blobResponse: Response;
       try {
@@ -332,24 +365,74 @@ export function bootstrapWarehouseSync() {
       } catch (error) {
         throw apiRequestFailure(error);
       }
-      if (!blobResponse.ok) throw githubHttpFailure(blobResponse.status);
+      if (!blobResponse.ok) await throwGitHubHttpFailure(blobResponse);
       let blob: { content?: string; encoding?: string };
       try {
         blob = (await blobResponse.json()) as typeof blob;
       } catch (error) {
         throw apiRequestFailure(error);
       }
+      if (!blob || typeof blob !== "object") {
+        throw apiRequestFailure(new Error("GitHub trả về Git Blob không hợp lệ cho kho-data.json."));
+      }
       encodedContent = blob.content?.replace(/\s/g, "") || "";
       if (!encodedContent || blob.encoding !== "base64") {
-        throw new Error("GitHub không trả về nội dung kho-data.json.");
+        throw apiRequestFailure(new Error("GitHub không trả về nội dung kho-data.json."));
       }
     }
-    const binary = atob(encodedContent);
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    const content = new TextDecoder("utf-8").decode(bytes);
-    const data = JSON.parse(content) as WarehouseData;
-    if (!valid(data)) throw new Error("kho-data.json không đúng cấu trúc dữ liệu kho.");
+    let content: string;
+    try {
+      const binary = atob(encodedContent);
+      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+      content = new TextDecoder("utf-8").decode(bytes);
+    } catch (error) {
+      throw apiRequestFailure(error);
+    }
+    let data: WarehouseData;
+    try {
+      data = JSON.parse(content) as WarehouseData;
+    } catch (error) {
+      throw apiRequestFailure(error);
+    }
+    if (!valid(data)) throw apiRequestFailure(new Error("kho-data.json không đúng cấu trúc dữ liệu kho."));
     return { data, sha: metadata.sha };
+  }
+
+  async function fetchLatestCommitTime(signal?: AbortSignal) {
+    assertOnline();
+    const config = getConfig();
+    const url = `${apiRoot}/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/commits?path=${encodeURIComponent("kho-data.json")}&per_page=1&sha=${encodeURIComponent("main")}&_=${Date.now()}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        headers: requestHeaders(config),
+        cache: "no-store",
+        signal,
+      });
+    } catch (error) {
+      throw apiRequestFailure(error);
+    }
+    if (!response.ok) await throwGitHubHttpFailure(response);
+    let commits: Array<{
+      commit?: {
+        committer?: { date?: string };
+        author?: { date?: string };
+      };
+    }>;
+    try {
+      commits = (await response.json()) as typeof commits;
+    } catch (error) {
+      throw apiRequestFailure(error);
+    }
+    if (!Array.isArray(commits)) {
+      throw apiRequestFailure(new Error("GitHub trả về danh sách commit không hợp lệ cho kho-data.json."));
+    }
+    const timestamp = commits[0]?.commit?.committer?.date || commits[0]?.commit?.author?.date;
+    const date = timestamp ? new Date(timestamp) : null;
+    if (!date || Number.isNaN(date.getTime())) {
+      throw apiRequestFailure(new Error("GitHub không trả về thời gian commit mới nhất của kho-data.json."));
+    }
+    return date;
   }
 
   function objectIdMap(values: unknown[]) {
@@ -476,17 +559,16 @@ export function bootstrapWarehouseSync() {
     } catch (error) {
       throw apiRequestFailure(error);
     }
-    if (response.status !== 200 && response.status !== 201) {
-      let message: string | undefined;
-      try {
-        const body = (await response.json()) as { message?: string };
-        if (body.message) message = body.message;
-      } catch {
-        // Keep the HTTP status when the API response has no JSON body.
-      }
-      throw githubHttpFailure(response.status, message);
+    if (response.status !== 200 && response.status !== 201) await throwGitHubHttpFailure(response);
+    let result: { commit?: { committer?: { date?: string }; author?: { date?: string } } } | null = null;
+    try {
+      result = (await response.json()) as typeof result;
+    } catch {
+      // The commit succeeded; the follow-up commits query supplies its timestamp if needed.
     }
-    return;
+    const timestamp = result?.commit?.committer?.date || result?.commit?.author?.date;
+    const committedAt = timestamp ? new Date(timestamp) : null;
+    return committedAt && !Number.isNaN(committedAt.getTime()) ? committedAt : null;
   }
 
   function installButtonLoading() {
@@ -507,14 +589,19 @@ export function bootstrapWarehouseSync() {
   }
 
   function refreshWarehouseUi() {
-    originalRenderers.rerender?.([]);
+    if (!frameWindow.__warehouseInitialPageRendered && frameWindow.go) {
+      frameWindow.go((window.location.hash || "#dashboard").slice(1));
+      frameWindow.__warehouseInitialPageRendered = true;
+    } else {
+      originalRenderers.rerender?.([]);
+    }
     const refreshChrome = (window as unknown as Record<string, unknown>).refreshChrome;
     const refreshSave = (window as unknown as Record<string, unknown>).refreshSave;
     if (typeof refreshChrome === "function") refreshChrome();
     if (typeof refreshSave === "function") refreshSave();
   }
 
-  function hydrateWarehouseData(data: WarehouseData, includeLocalConfig = false) {
+  async function hydrateWarehouseData(data: WarehouseData, includeLocalConfig = false) {
     latestRemote = clone(data);
     const hydrated = clone(data);
     const localConfig = getConfig();
@@ -523,9 +610,10 @@ export function bootstrapWarehouseSync() {
     }
     S = hydrated;
     baseData = clone(data);
-    remoteReady = true;
+    isRemoteHydrated = true;
     frameWindow.__warehouseRemoteDataLoaded = true;
-    persist(S);
+    Store.lsSave(S);
+    await Store.idbSave(S);
     refreshWarehouseUi();
   }
 
@@ -533,7 +621,7 @@ export function bootstrapWarehouseSync() {
     busy = false;
     restoreButtonLoading();
     if (success) {
-      setStatus("ok", formatSyncTimestamp());
+      setStatus("ok", latestCommitTime ? formatSyncTimestamp(latestCommitTime) : "");
       const refreshChrome = (window as unknown as Record<string, unknown>).refreshChrome;
       const refreshSave = (window as unknown as Record<string, unknown>).refreshSave;
       if (typeof refreshChrome === "function") refreshChrome();
@@ -547,7 +635,7 @@ export function bootstrapWarehouseSync() {
       if (renderAfterCommit && originalRenderers.rerender) originalRenderers.rerender([]);
       originalCloseModal?.();
       queuedToasts.length = 0;
-      originalToast?.("Mất kết nối Wi-Fi — Không thể lưu dữ liệu, vui lòng kiểm tra lại mạng!", "err");
+      originalToast?.(statusDetail, "err");
     }
     closeAfterCommit = false;
     renderAfterCommit = false;
@@ -567,12 +655,13 @@ export function bootstrapWarehouseSync() {
       try {
         const { data } = await fetchLatestRemote(signal);
         assertOnline();
-        hydrateWarehouseData(data, true);
+        await hydrateWarehouseData(data, true);
+        latestCommitTime = await fetchLatestCommitTime(signal);
         if (!hasWriteAccess()) {
-          setStatus("error", "Cần GitHub Token có quyền ghi repository.");
+          setStatus("error", tokenRequiredMessage);
           return false;
         }
-        setStatus("ok", formatSyncTimestamp());
+        setStatus("ok", formatSyncTimestamp(latestCommitTime));
         return true;
       } catch (error) {
         const message = signal?.aborted
@@ -594,7 +683,6 @@ export function bootstrapWarehouseSync() {
       if (!navigator.onLine) throw new Error("Mất kết nối Wi-Fi.");
       const config = getConfig();
       if (!config.owner || !config.repo) throw configError() || new Error("Hãy cấu hình GitHub Repository trước khi đồng bộ.");
-      if (!getToken(config)) throw new Error("Cần GitHub Token có quyền ghi repository.");
       await CloudSync.pullLatest({ manual: false, signal: controller.signal });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Không tải được dữ liệu mới nhất từ GitHub.";
@@ -614,11 +702,11 @@ export function bootstrapWarehouseSync() {
       setStatus("error", "Mất kết nối Wi-Fi.");
       return false;
     }
-    if (!remoteReady || !baseData) {
+    if (!isRemoteHydrated || !baseData) {
       if (!(await pullLatest())) return false;
     }
     if (!hasWriteAccess()) {
-      setStatus("error", "Cần GitHub Token có quyền ghi repository.");
+      setStatus("error", tokenRequiredMessage);
       return false;
     }
     const baseSnapshot = clone(baseData as WarehouseData);
@@ -631,23 +719,25 @@ export function bootstrapWarehouseSync() {
     statusDetail = "Đang đồng bộ...";
     commitPromise = (async () => {
       try {
-        for (let attempt = 0; attempt < 3; attempt += 1) {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
           const latest = await fetchLatestRemote(controller.signal);
           latestRemote = clone(latest.data);
           const merged = mergeData(baseSnapshot, localSnapshot, latest.data);
           try {
-            await putRemote(merged, latest.sha, controller.signal);
-            hydrateWarehouseData(merged, true);
+            const putCommitTime = await putRemote(merged, latest.sha, controller.signal);
+            latestRemote = clone(merged);
+            latestCommitTime = putCommitTime || await fetchLatestCommitTime(controller.signal);
+            await hydrateWarehouseData(merged, true);
             DIRTY = false;
             runDeferredUi(true);
             return true;
           } catch (error) {
             const status = (error as Error & { status?: number }).status;
-            if ((status === 409 || status === 422) && attempt < 2) continue;
+            if (status === 409 && attempt === 0) continue;
             throw error;
           }
         }
-        throw new Error("GitHub từ chối cập nhật sau nhiều lần thử. Hãy đồng bộ lại.");
+        throw githubHttpFailure(409, "Conflict after one retry");
       } catch (error) {
         const message = controller.signal.aborted
           ? `GitHub request timed out after ${Math.round(requestTimeoutMs / 1000)} seconds.`
@@ -741,12 +831,18 @@ export function bootstrapWarehouseSync() {
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target.closest("button, input") : null;
     if (!(target instanceof HTMLButtonElement || target instanceof HTMLInputElement) || !isSubmitControl(target)) return;
-    if (syncStatus !== "ok") {
+    if ((!isRemoteHydrated || !navigator.onLine || syncStatus !== "ok" || apiRequestFailed) && !canSaveGitHubConfig(target)) {
       event.preventDefault();
       event.stopImmediatePropagation();
       return;
     }
     if (target instanceof HTMLButtonElement) lastActionButton = target;
+  }, true);
+  document.addEventListener("keydown", (event) => {
+    if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") return;
+    if (isRemoteHydrated && navigator.onLine && syncStatus === "ok" && !apiRequestFailed) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
   }, true);
 
   new MutationObserver(refreshButtonLock).observe(document.body, {
@@ -792,10 +888,9 @@ export function wrapWarehouseHtml(source: string) {
   if (startupIndex < 0) throw new Error("Không tìm thấy điểm khởi tạo đồng bộ trong kho-app.html.");
   let wrapped = `${source.slice(0, startupIndex)}window.__warehouseStartupPullSuppressed = true;${source.slice(startupIndex + startupPull.length)}`;
   wrapped = wrapped.replace(
-    "if(valid(idbData) && (idbData.updated||0) > (S.updated||0)){",
-    "if(!window.__warehouseRemoteDataLoaded && valid(idbData) && (idbData.updated||0) > (S.updated||0)){",
+    /<head([^>]*)>/i,
+    '<head$1><base href="/kho-app.html"><script>window.__warehouseRemoteHydrationRequired=true;</script>',
   );
-  wrapped = wrapped.replace(/<head([^>]*)>/i, '<head$1><base href="/kho-app.html">');
   const bridgeScript = `<script>(${bootstrapWarehouseSync.toString()})();</script>`;
   return wrapped.replace(/<\/body>/i, `${bridgeScript}</body>`);
 }

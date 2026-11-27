@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { TopBar } from "@/components/TopBar";
 import { wrapWarehouseHtml } from "@/lib/warehouse-sync-bridge";
 
-const OFFLINE_BANNER_MESSAGE = "Mất kết nối Wi-Fi — Không thể lưu dữ liệu, vui lòng kiểm tra lại mạng!";
+const OFFLINE_BANNER_MESSAGE = "Mất kết nối Wi-Fi.";
 
 export const Route = createFileRoute("/_authenticated/kho")({
   head: () => ({
@@ -70,7 +70,7 @@ function KhoPage() {
       if (!event.data || event.data.type !== "warehouse-github-sync") return;
       if (event.data.status === "ok") {
         setGithubError("");
-      } else if (event.data.status === "error" && event.data.apiFailure === true && navigator.onLine) {
+      } else if (event.data.status === "error") {
         setGithubError(typeof event.data.detail === "string" && event.data.detail
           ? event.data.detail
           : "Lỗi yêu cầu GitHub.");

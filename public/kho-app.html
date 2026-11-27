@@ -1014,7 +1014,7 @@ function load(){
 (async function syncIndexedDB(){
   try {
     const idbData = await Store.idbLoad();
-    if(valid(idbData) && (idbData.updated||0) > (S.updated||0)){
+    if(!window.__warehouseRemoteHydrationRequired && !window.__warehouseRemoteDataLoaded && valid(idbData) && (idbData.updated||0) > (S.updated||0)){
       S = idbData;
       FROM_DRAFT=true;
       rerender();
@@ -3224,8 +3224,10 @@ function clearAll(){if(!confirm('Xóa SẠCH toàn bộ sản phẩm và phiếu
 function toast(msg,type){const t=document.createElement('div');t.className='toast'+(type?' '+type:'');t.textContent=msg;$('#toasts').appendChild(t);setTimeout(()=>{t.style.opacity=0;t.style.transition='.3s'},3800);setTimeout(()=>t.remove(),4200)}
 document.addEventListener('click',e=>{const z=e.target.closest('[data-zoom]');if(z){$('#zoomImg').src=z.src;$('#zoom').classList.add('show')}});
 $('#today').textContent=TODAY.toLocaleDateString('vi-VN',{weekday:'long',day:'2-digit',month:'2-digit',year:'numeric'});
-refreshChrome();refreshSave();
-go((location.hash||'#dashboard').slice(1));
+if(!window.__warehouseRemoteHydrationRequired){
+  refreshChrome();refreshSave();
+  go((location.hash||'#dashboard').slice(1));
+}
 // Tự động kéo dữ liệu mới nhất từ GitHub / Máy chủ ngay khi mở trang hoặc nhấn F5
 CloudSync.pullLatest({ manual: false });
 // Tự động kiểm tra dữ liệu mới khi người dùng quay lại tab hoặc kết nối lại mạng
